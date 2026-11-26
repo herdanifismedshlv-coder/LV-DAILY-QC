@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Pemantapan Mutu Internal (PMI) by Radiology Department SHLV - Siloam Hospitals Lippo Village
-  1) Form Digital Monitoring Suhu dan Kelembapan   (grafik titik SUHU & KELEMBAPAN per ruangan, 3 shift P/S/M)
+  1) Pemeriksaan Harian Suhu & Kelembaban (format FORM-SHG-KL-11 Rev02: titik SUHU & KELEMBABAN per ruangan, jam 8 / 14 / 22)
   2) Form Digital Daily Quality Control            (daftar periksa harian per modalitas: KEGIATAN + PARAMETER)
 
 Checklist QC mengikuti "Form_QC_Harian_LV.xlsx" (format Siloam): NO | KETERANGAN | JML | tanggal x shift,
@@ -34,8 +34,8 @@ SITE = "LIPPO VILLAGE"
 DEPT_LINE = "DEPARTEMEN RADIOLOGI SILOAM HOSPITALS LIPPO VILLAGE"
 TZ = dt.timezone(dt.timedelta(hours=7))  # WIB (Streamlit Cloud berjalan di UTC, jadi zona waktu dipaksa ke WIB)
 QC_DUE_HOUR = 21                         # checklist QC hari ini dianggap "jatuh tempo" setelah jam ini
-SUHU_NORMAL = (18.0, 23.0)               # target suhu (°C), berlaku untuk SEMUA ruangan - sesuaikan dengan form Siloam
-HUM_NORMAL = (40.0, 60.0)                # target kelembapan (%)
+SUHU_NORMAL = (20.0, 24.0)               # "Suhu : 20 - 24 °C" di form Siloam, berlaku untuk SEMUA ruangan
+HUM_NORMAL = (30.0, 70.0)                # batas kelembaban bawaan (ruang baru); batas tiap ruang ada di ROOM_HUM
 
 # Warna merek Siloam (biru navy dari logo). Warna lama (biru Mandaya) otomatis diganti lewat _rc().
 BRAND_DARK = "#0b2272"    # teks / judul / tombol utama
@@ -108,7 +108,7 @@ FONT_URLS = {
 
 BLN = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
 SHIFT_NAME = {"P": "Pagi", "S": "Siang", "M": "Malam"}
-SHIFT_HOUR = {"P": 7, "S": 13, "M": 20}   # jam pengisian per shift - sesuaikan dengan kebiasaan di Siloam
+SHIFT_HOUR = {"P": 8, "S": 14, "M": 22}   # kolom "Jam" di form Siloam: 8, 14, 22
 SHIFT_LABEL = {k: "{} - {} ({:02d}.00)".format(k, SHIFT_NAME[k], SHIFT_HOUR[k]) for k in "PSM"}
 SHIFT_TIMES = " · ".join("{:02d}.00".format(SHIFT_HOUR[k]) for k in "PSM")
 SHIFT_NAME["H"] = "Harian"   # form tanpa pembagian shift (mis. Duo Diagnost Kamar 5)
@@ -122,8 +122,21 @@ _ROOMS = ["Philips 1.5 T", "Siemens 3T", "Digital Diagnost (Kamar 4)", "Duo Diag
 ROOM_STAFF = {}
 
 
+# Batas kelembaban (%) per ruang & kode dokumen, mengikuti sheet FORM-SHG-KL-11 Rev02 (Permenkes No 24 Tahun 2020 + manual alat).
+#   MRI 30-70 | X-Ray / Fluoroskopi 20-75 | Dental Panoramik 40-55 | CT Scan 50-60
+# BMD tidak ada di workbook Siloam -> sementara memakai batas X-Ray (20-75). Ubah di sini bila ada batas resmi.
+ROOM_HUM = {"Philips 1.5 T": (30.0, 70.0), "Siemens 3T": (30.0, 70.0),
+            "Digital Diagnost (Kamar 4)": (20.0, 75.0), "Duo Diagnost (Kamar 5)": (20.0, 75.0),
+            "Panoramik CBCT": (40.0, 55.0), "BMD": (20.0, 75.0), "CT Scan Siemens Somatom Drive": (50.0, 60.0)}
+ROOM_KODE = {"Philips 1.5 T": "SHKL 2205.11.6/2", "Siemens 3T": "SHKL 2205.11.6/2",
+             "Digital Diagnost (Kamar 4)": "SHKL 2205.11.3/2", "Duo Diagnost (Kamar 5)": "SHKL 2205.11.4/2",
+             "Panoramik CBCT": "SHKL 2205.11.2/2", "CT Scan Siemens Somatom Drive": "SHKL 2205.11.5/2"}
+DOC_KODE = "SHKL 2205.11/2"    # kode umum bila ruang belum punya kode sendiri
+
+
 def _default_room(n):
-    r = dict(nama=n, tekanan=False, t_lo=SUHU_NORMAL[0], t_hi=SUHU_NORMAL[1], h_lo=HUM_NORMAL[0], h_hi=HUM_NORMAL[1])
+    hl, hh = ROOM_HUM.get(n, HUM_NORMAL)
+    r = dict(nama=n, tekanan=False, t_lo=SUHU_NORMAL[0], t_hi=SUHU_NORMAL[1], h_lo=hl, h_hi=hh)
     if n in ROOM_STAFF:
         r["staff"] = list(ROOM_STAFF[n])
     return r
@@ -1034,112 +1047,118 @@ def _wrap(s, size, maxw, bold=False):
     return lines or [""]
 
 
-# ---------- FORM 1: FORM DIGITAL MONITORING SUHU DAN KELEMBAPAN ----------
-TH_TEMPS = list(range(30, 14, -1))        # baris suhu: 30 ... 15
-TH_HUMS = list(range(65, 29, -5))         # baris kelembapan: 65, 60, ... 30
+# ---------- FORM 1: PEMERIKSAAN HARIAN SUHU & KELEMBABAN (format Siloam FORM-SHG-KL-11 Rev02) ----------
+# Mengikuti sheet per-ruang di "FORM-SHG-KL-11 ... Rev02": judul, "Siloam Hospitals / Ruang / Bulan", batas Suhu & Kelembaban,
+# tabel SUHU (27 -> 16 °C) dan KELEMBABAN (100 -> 10 %) dengan kolom Tanggal 1-31 x Jam 8 / 14 / 22 (tiap label = 2 baris),
+# pita merah muda = di dalam batas normal, baris "Nama", lalu Catatan + kode dokumen.
+TH_TEMPS = list(range(27, 15, -1))        # label suhu: 27 ... 16 (°C)
+TH_HUMS = list(range(100, 9, -10))        # label kelembaban: 100 ... 10 (%)
+C_PINK = "#f8d7d7"                        # pita "didalam batas normal"
 
 
 def build_th_form(ruang, y, m, data):
     std = room_std(ruang)
     tlo, thi, hlo, hhi = std["t_lo"], std["t_hi"], std["h_lo"], std["h_hi"]
-    W = 1100.0
-    MX, LBL = 22.0, 36.0
-    SB = (W - 2 * MX - LBL) / 93.0
-    DW = SB * 3
-    XD = MX + LBL
+    W = 1190.0
+    MX, AW, BW = 14.0, 22.0, 32.0
+    XB = MX + AW                    # kolom label derajat / persen
+    XD = XB + BW                    # awal kolom tanggal 1
+    SB = (W - 14.0 - XD) / 93.0     # lebar 1 kolom jam (8 / 14 / 22)
+    DW = SB * 3                     # lebar 1 tanggal
     XE = XD + 31 * DW
-    RH = 17.0
-    HB, HT, HD, HBAR, HN = 15.0, 15.0, 13.0, 7.0, 17.0
+    RH = 7.6                        # tinggi 1 baris (1 label = 2 baris)
     sh = Sheet(W, 10)
 
-    _logo_into(sh, MX, 8, 190, 62)
-    sh.text(W / 2, 36, "Form Digital Monitoring Suhu dan Kelembapan", 19, True, BLACK, "middle")
-    sh.text(W / 2, 60, "Departemen Radiologi Tahun {}".format(y), 19, True, BLACK, "middle")
-    sh.text(MX, 92, "RUANG : {}".format(ruang), 11.5, True)
-    sh.text(MX, 110, "BULAN : {} {}".format(BLN[m - 1].upper(), y), 10.5, True)
+    # ---- kepala form ----
+    _logo_into(sh, MX, 6, 130, 46)
+    sh.text((XD + XE) / 2, 26, "Pemeriksaan Harian Suhu & Kelembaban Ruang Radiology - {}".format(ruang), 12, True, BLACK, "middle")
+    for i, (a, b) in enumerate((("Siloam Hospitals", ": " + SITE), ("Ruang", ": " + ruang), ("Bulan", ": {} {}".format(BLN[m - 1].upper(), y)))):
+        sh.text(MX, 70 + i * 13, a, 8.5)
+        sh.text(MX + 80, 70 + i * 13, b, 8.5)
+    sh.text(500, 70, "Suhu", 8.5)
+    sh.text(566, 70, ": {:g} - {:g} °C".format(tlo, thi), 8.5)
+    sh.text(500, 83, "Kelembaban", 8.5)
+    sh.text(566, 83, ": {:g} - {:g} %".format(hlo, hhi), 8.5)
+    sh.rect(760, 61, 16, 10, C_PINK, None, 0)
+    sh.text(780, 70, ": didalam batas normal", 8.5)
 
-    def header_rows(y0, judul, target):
-        xs = XD + 8 * DW
-        sh.rect(MX, y0, xs - MX, HB, C_GREY, BLACK, 0.5)
-        sh.ctext(MX, y0, xs - MX, HB, judul, 8.5, True)
-        sh.rect(xs, y0, XE - xs, HB, C_GREY, BLACK, 0.5)
-        sh.ctext(xs, y0, XE - xs, HB, target, 8.5, True)
-        yt, yd = y0 + HB, y0 + HB + HT
-        sh.rect(MX, yt, LBL, HT, WHITE, BLACK, 0.5)
-        sh.ctext(MX, yt, LBL, HT, "Tgl", 7.5, True)
-        sh.rect(MX, yd, LBL, HD, WHITE, BLACK, 0.5)
-        sh.ctext(MX, yd, LBL, HD, "Dinas", 7, True)
+    def table(y0, judul, vals, lo, hi, key, unit):
+        n = len(vals)
+        HT, HJ = 14.0, 11.0
+        sh.rect(MX, y0, AW + BW, HT, WHITE, BLACK, 0.5)
+        sh.ctext(MX, y0, AW + BW, HT, "Tanggal", 7.5)
+        sh.rect(MX, y0 + HT, AW + BW, HJ, WHITE, BLACK, 0.5)
+        sh.ctext(MX, y0 + HT, AW + BW, HJ, "Jam", 7)
         for d in range(1, 32):
             x = XD + (d - 1) * DW
-            fill = C_DAY if d % 2 == 0 else WHITE
-            sh.rect(x, yt, DW, HT, fill, BLACK, 0.5)
-            sh.ctext(x, yt, DW, HT, str(d), 7.5, True)
-            for k, ch in enumerate("PSM"):
-                sh.rect(x + k * SB, yd, SB, HD, fill, BLACK, 0.4)
-                sh.ctext(x + k * SB, yd, SB, HD, ch, 6.2, True)
-        return yd + HD
-
-    def grid(y0, values, lo, hi):
-        for i, v in enumerate(values):
-            yy = y0 + i * RH
-            out = v < lo or v > hi
-            sh.rect(MX, yy, LBL, RH, C_OUT if out else WHITE, BLACK, 0.5)
-            sh.ctext(MX, yy, LBL, RH, str(v), 8, True, RED if out else BLACK)
-            for d in range(1, 32):
-                x = XD + (d - 1) * DW
-                fill = C_DAY if d % 2 == 0 else WHITE
-                for k in range(3):
-                    sh.rect(x + k * SB, yy, SB, RH, fill, BLACK, 0.4)
-
-    def dots(y0, values, key, lo, hi):
-        top, step = values[0], values[0] - values[1]
+            sh.rect(x, y0, DW, HT, WHITE, BLACK, 0.5)
+            sh.ctext(x, y0, DW, HT, str(d), 7)
+            for k, s in enumerate("PSM"):
+                sh.rect(x + k * SB, y0 + HT, SB, HJ, WHITE, BLACK, 0.4)
+                sh.ctext(x + k * SB, y0 + HT, SB, HJ, str(SHIFT_HOUR[s]), 4.8)
+        g0 = y0 + HT + HJ
+        gh = 2 * n * RH
+        # pita merah muda = label yang masuk batas normal
+        idx = [i for i, v in enumerate(vals) if lo <= v <= hi]
+        if idx:
+            sh.rect(XB, g0 + idx[0] * 2 * RH, XE - XB, (idx[-1] - idx[0] + 1) * 2 * RH, C_PINK, None, 0)
+        # kolom judul vertikal + kolom label
+        sh.rect(MX, g0, AW, gh, None, BLACK, 0.5)
+        sh.text(MX + AW / 2 + 3, g0 + gh / 2, judul, 8.5, True, BLACK, "middle", 90)
+        for i, v in enumerate(vals):
+            yb = g0 + i * 2 * RH
+            sh.rect(XB, yb, BW, 2 * RH, C_PINK if lo <= v <= hi else WHITE, BLACK, 0.5)
+            sh.text(XB + BW - 3, yb + RH + 2.4, "{}{}".format(v, unit), 6.8, False, BLACK, "end")
+        # garis kisi: baris (tiap 2 baris = 1 label) & kolom (tiap 3 kolom = 1 tanggal)
+        for r in range(2 * n + 1):
+            sh.line(XD, g0 + r * RH, XE, g0 + r * RH, BLACK, 0.55 if r % 2 == 0 else 0.22)
+        for c in range(94):
+            sh.line(XD + c * SB, g0, XD + c * SB, g0 + gh, BLACK, 0.7 if c % 3 == 0 else 0.22)
+        # titik hasil ukur (hitam = normal, merah = di luar batas)
+        top, step = vals[0], vals[0] - vals[1]
         for (d, s), e in data.items():
             v = e[key]
-            k = "PSM".index(s)
-            cx = XD + (d - 1) * DW + (k + 0.5) * SB
-            cy = y0 + (top - v) / step * RH + RH / 2
-            cy = min(max(cy, y0 + 3.5), y0 + len(values) * RH - 3.5)
-            sh.circle(cx, cy, 3.4, RED if (v < lo or v > hi) else BLACK)
+            cx = XD + (d - 1) * DW + ("PSM".index(s) + 0.5) * SB
+            cy = g0 + (top - v) / step * 2 * RH + RH
+            cy = min(max(cy, g0 + 3.0), g0 + gh - 3.0)
+            sh.circle(cx, cy, 2.3, RED if (v < lo or v > hi) else BLACK)
+        # baris Nama (inisial petugas per jam)
+        yn, NH = g0 + gh, 15.0
+        sh.rect(MX, yn, AW, NH, WHITE, BLACK, 0.5)
+        sh.ctext(MX, yn, AW, NH, "Nama", 5.6)
+        sh.rect(XB, yn, BW, NH, BLACK, BLACK, 0.5)
+        for d in range(1, 32):
+            for k, s in enumerate("PSM"):
+                x = XD + (d - 1) * DW + k * SB
+                sh.rect(x, yn, SB, NH, WHITE, BLACK, 0.4)
+                e = data.get((d, s))
+                if e and e["petugas"]:
+                    p = e["petugas"]
+                    sh.ctext(x, yn, SB, NH, p, 5.4 if len(p) <= 2 else 4.0, True)
+        return yn + NH
 
-    y1 = 124.0
-    g1 = header_rows(y1, "SUHU", "Target Temperatur ({:g} - {:g})°C".format(tlo, thi))
-    grid(g1, TH_TEMPS, tlo, thi)
-    dots(g1, TH_TEMPS, "suhu", tlo, thi)
-    yb = g1 + len(TH_TEMPS) * RH
-    sh.rect(MX, yb, XE - MX, HBAR, NAVY, None, 0)
+    y1 = 108.0
+    e1 = table(y1, "Suhu", TH_TEMPS, tlo, thi, "suhu", "°C")
+    e2 = table(e1 + 14.0, "Kelembaban", TH_HUMS, hlo, hhi, "hum", "%")
 
-    y2 = yb + HBAR + 2
-    g2 = header_rows(y2, "KELEMBAPAN", "Target kelembapan ( {:g} - {:g} % )".format(hlo, hhi))
-    grid(g2, TH_HUMS, hlo, hhi)
-    dots(g2, TH_HUMS, "hum", hlo, hhi)
-    yn = g2 + len(TH_HUMS) * RH
-
-    sh.rect(MX, yn, LBL, HN, C_NAME, BLACK, 0.5)
-    sh.ctext(MX, yn, LBL, HN, "NAMA", 7.5, True)
-    for d in range(1, 32):
-        for k, s in enumerate("PSM"):
-            x = XD + (d - 1) * DW + k * SB
-            sh.rect(x, yn, SB, HN, C_NAME, BLACK, 0.4)
-            e = data.get((d, s))
-            if e and e["petugas"]:
-                p = e["petugas"]
-                sh.ctext(x, yn, SB, HN, p, 5.6 if len(p) <= 2 else 4.2, True)
-    ye = yn + HN
-    sh.rect(MX, ye, XE - MX, 12.0, NAVY, None, 0)
-    yend = ye + 12.0
-
+    # ---- kode dokumen, catatan, temuan ----
+    sh.text(XE, e2 + 13, ROOM_KODE.get(ruang, DOC_KODE), 8, False, BLACK, "end")
+    yy = e2 + 18
+    sh.text(MX, yy, "Catatan", 8)
+    sh.text(MX + 40, yy, ":  1) Hubungi teknisi bila terjadi ketidaksesuaian pengukuran batas normal", 8)
+    yy += 12
+    sh.text(MX + 47, yy, "2) Batas suhu dan kelembaban berdasarkan Permenkes No 24 Tahun 2020 dan Manual Book Alat", 8)
     notes = []
     for (d, s), e in sorted(data.items()):
         if e.get("ket"):
             notes.extend(_wrap("Tgl {} ({}): {}".format(d, SHIFT_NAME[s], e["ket"]), 7.5, XE - MX - 30))
     if notes:
-        yy = yend + 16
+        yy += 16
         sh.text(MX, yy, "Keterangan temuan:", 8, True)
         for ln in notes[:8]:
             yy += 10
             sh.text(MX + 8, yy, ln, 7.5)
-        yend = yy
-    sh.height = yend + 14.0
+    sh.height = yy + 16.0
     return sh
 
 
